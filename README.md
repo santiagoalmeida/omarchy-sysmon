@@ -30,13 +30,13 @@ UDisks2 D-Bus calls. The collector script is bundled with this plugin
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/santyalmeida/omarchy-sysmon.git --enable --yes
+omarchy plugin add https://github.com/santiagoalmeida/omarchy-sysmon.git --enable --yes
 ```
 
 Or interactively:
 
 ```bash
-omarchy plugin add https://github.com/santyalmeida/omarchy-sysmon.git
+omarchy plugin add https://github.com/santiagoalmeida/omarchy-sysmon.git
 ```
 
 This clones the plugin into `~/.config/omarchy/plugins/santyalmeida.sysmon/`.
