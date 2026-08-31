@@ -174,7 +174,7 @@ def drive_temp_c(device_name):
 def disks_info():
     try:
         out = subprocess.run(
-            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MOUNTPOINT,FSSIZE,FSUSED,MODEL"],
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MOUNTPOINT,FSSIZE,FSUSED,MODEL,ROTA"],
             capture_output=True, text=True, timeout=3,
         )
         data = json.loads(out.stdout)
@@ -199,6 +199,11 @@ def disks_info():
                 used_bytes += int(child.get("fsused") or 0)
             stack.extend(child.get("children") or [])
 
+        rota = dev.get("rota")
+        kind = None
+        if rota is not None:
+            kind = "hdd" if str(rota) in ("1", "true", "True") else "ssd"
+
         results.append({
             "device": name,
             "model": (dev.get("model") or "").strip(),
@@ -206,6 +211,7 @@ def disks_info():
             "usedBytes": used_bytes,
             "percent": round(100.0 * used_bytes / fs_bytes, 1) if fs_bytes else None,
             "tempC": drive_temp_c(name),
+            "kind": kind,
         })
     return results
 

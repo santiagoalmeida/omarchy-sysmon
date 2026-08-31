@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -19,6 +20,14 @@ Panel {
   readonly property color warn: Qt.lighter(Color.urgent, 1.35)
   readonly property color track: Style.selectedFillFor(foreground, Color.accent, Color.urgent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // Nerd Font glyphs, verified against the installed font's cmap/post
+  // tables (JetBrainsMono Nerd Font): md-harddisk U+F02CA, md-memory
+  // U+F035B (both outside the BMP, hence fromCodePoint), fa-hdd_o U+F0A0.
+  readonly property string iconHdd: String.fromCodePoint(0xF02CA)
+  readonly property string iconSsd: String.fromCodePoint(0xF035B)
+  readonly property string iconDiskGeneric: String.fromCodePoint(0xF0A0)
+  readonly property real diskTileWidth: Style.space(96)
 
   property var stats: ({})
   readonly property bool hasData: stats && stats.cpu !== undefined
@@ -198,6 +207,144 @@ Panel {
     }
   }
 
+  component RingMeter: Item {
+    id: ring
+    property real value: 0
+    property string centerText: ""
+    property color fillColor: root.foreground
+
+    readonly property real diameter: Style.space(56)
+    readonly property real ringWidth: Style.space(5)
+
+    implicitWidth: diameter
+    implicitHeight: diameter
+
+    Behavior on value {
+      NumberAnimation { duration: 300; easing.type: Easing.OutCubic }
+    }
+
+    Shape {
+      anchors.fill: parent
+      antialiasing: true
+      preferredRendererType: Shape.CurveRenderer
+
+      // Track: full ring, always visible, dim.
+      ShapePath {
+        strokeWidth: ring.ringWidth
+        strokeColor: root.track
+        fillColor: "transparent"
+        capStyle: ShapePath.RoundCap
+
+        PathAngleArc {
+          centerX: ring.width / 2
+          centerY: ring.height / 2
+          radiusX: (ring.diameter - ring.ringWidth) / 2
+          radiusY: (ring.diameter - ring.ringWidth) / 2
+          startAngle: -90
+          sweepAngle: 360
+        }
+      }
+
+      // Value: fills clockwise from the top.
+      ShapePath {
+        strokeWidth: ring.ringWidth
+        strokeColor: ring.value > 0.004 ? ring.fillColor : "transparent"
+        fillColor: "transparent"
+        capStyle: ShapePath.RoundCap
+
+        PathAngleArc {
+          centerX: ring.width / 2
+          centerY: ring.height / 2
+          radiusX: (ring.diameter - ring.ringWidth) / 2
+          radiusY: (ring.diameter - ring.ringWidth) / 2
+          startAngle: -90
+          sweepAngle: 360 * root.clamp01(ring.value)
+        }
+      }
+    }
+
+    Text {
+      anchors.centerIn: parent
+      text: ring.centerText
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+  }
+
+  // Column forbids vertical/fill anchors on its own children, so the
+  // hover MouseArea can't live inside `content` -- it sits beside it as
+  // a plain Item child instead, free to anchors.fill this wrapper.
+  component DiskTile: Item {
+    id: tile
+    required property var modelData
+
+    readonly property real pct: modelData.percent
+    readonly property bool hot: root.isHot(modelData.tempC, 58)
+    readonly property string glyph: modelData.kind === "hdd" ? root.iconHdd
+                                    : modelData.kind === "ssd" ? root.iconSsd
+                                    : root.iconDiskGeneric
+
+    implicitHeight: content.implicitHeight
+    height: implicitHeight
+
+    Column {
+      id: content
+      anchors.horizontalCenter: parent.horizontalCenter
+      spacing: Style.spacing.xs
+
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.spacing.xs
+
+        Text {
+          text: tile.glyph
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          text: tile.modelData.device
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+          width: Math.min(implicitWidth, root.diskTileWidth - Style.space(20))
+        }
+      }
+
+      RingMeter {
+        anchors.horizontalCenter: parent.horizontalCenter
+        value: (tile.pct !== null && tile.pct !== undefined) ? tile.pct / 100 : 0
+        fillColor: tile.hot ? root.urgent : root.foreground
+        centerText: root.fmtPercent(tile.pct)
+      }
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: root.fmtTemp(tile.modelData.tempC)
+        color: root.tempColor(tile.modelData.tempC, 48, 58)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    MouseArea {
+      id: tileHover
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+
+      PanelToolTip {
+        visible: tileHover.containsMouse
+        text: "/dev/" + tile.modelData.device + (tile.modelData.model ? "  ·  " + tile.modelData.model : "")
+        fontFamily: root.fontFamily
+      }
+    }
+  }
+
   PopupCard {
     id: popup
     anchorItem: button
@@ -321,28 +468,19 @@ Panel {
           text: "STORAGE"
         }
 
-        Repeater {
-          model: root.disks
+        Grid {
+          id: diskGrid
+          width: parent.width
+          spacing: Style.spacing.md
+          horizontalItemAlignment: Grid.AlignHCenter
+          columns: Math.max(1, Math.min(3, root.disks.length,
+                                         Math.floor((width + spacing) / (root.diskTileWidth + spacing))))
 
-          Column {
-            required property var modelData
-            width: parent.width
-            spacing: Style.spacing.xs
+          Repeater {
+            model: root.disks
 
-            Text {
-              text: "/dev/" + modelData.device + (modelData.model ? "  ·  " + modelData.model : "")
-              color: Qt.darker(root.foreground, 1.15)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-              width: parent.width
-            }
-
-            StatMeter {
-              label: "Used"
-              value: modelData.percent !== null && modelData.percent !== undefined ? modelData.percent / 100 : 0
-              trailing: root.fmtPercent(modelData.percent) + "  ·  " + root.fmtTemp(modelData.tempC)
-              fillColor: root.isHot(modelData.tempC, 58) ? root.urgent : root.foreground
+            DiskTile {
+              width: root.diskTileWidth
             }
           }
         }
