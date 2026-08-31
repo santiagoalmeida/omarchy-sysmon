@@ -1,0 +1,229 @@
+#!/usr/bin/python3
+"""Print one JSON snapshot of CPU/GPU/RAM/disk usage and temperature.
+
+Meant to be polled every couple seconds by the sysmon bar widget. Every
+source here is either a /proc read, a CLI already on this machine
+(nvidia-smi, lsblk), or an unprivileged UDisks2 D-Bus call (SmartUpdate is
+allowed for the active local session by default polkit policy, so no root
+and no smartmontools install are needed for disk temperatures).
+"""
+
+import json
+import re
+import subprocess
+import sys
+import time
+
+
+def read_proc_stat():
+    with open("/proc/stat") as f:
+        line = f.readline()
+    parts = [int(x) for x in line.split()[1:]]
+    idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+    total = sum(parts)
+    return idle, total
+
+
+def cpu_percent(sample_seconds=0.2):
+    idle1, total1 = read_proc_stat()
+    time.sleep(sample_seconds)
+    idle2, total2 = read_proc_stat()
+    dt = total2 - total1
+    if dt <= 0:
+        return 0.0
+    return round(max(0.0, min(100.0, 100.0 * (1 - (idle2 - idle1) / dt))), 1)
+
+
+def cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def cpu_temp():
+    try:
+        out = subprocess.run(["sensors", "-j"], capture_output=True, text=True, timeout=2)
+        data = json.loads(out.stdout)
+    except Exception:
+        return None
+    # Prefer the package/control temp: k10temp's Tctl (AMD) or coretemp's
+    # "Package id 0" (Intel). Fall back to the first temp1 input found.
+    fallback = None
+    for chip, sensors_ in data.items():
+        chip_lower = chip.lower()
+        if not (chip_lower.startswith("k10temp") or chip_lower.startswith("coretemp") or chip_lower.startswith("zenpower")):
+            continue
+        for label, readings in sensors_.items():
+            if not isinstance(readings, dict):
+                continue
+            temp = None
+            for key, value in readings.items():
+                if key.endswith("_input"):
+                    temp = value
+                    break
+            if temp is None:
+                continue
+            if label.lower() in ("tctl", "package id 0", "tdie"):
+                return round(temp, 1)
+            if fallback is None:
+                fallback = round(temp, 1)
+    return fallback
+
+
+def mem_info():
+    values = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                m = re.match(r"^(\w+):\s+(\d+)\s*kB", line)
+                if m:
+                    values[m.group(1)] = int(m.group(2)) * 1024
+    except OSError:
+        return None
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", 0)
+    used = max(0, total - available)
+    swap_total = values.get("SwapTotal", 0)
+    swap_free = values.get("SwapFree", 0)
+    swap_used = max(0, swap_total - swap_free)
+    return {
+        "totalBytes": total,
+        "usedBytes": used,
+        "percent": round(100.0 * used / total, 1) if total else 0.0,
+        "swapTotalBytes": swap_total,
+        "swapUsedBytes": swap_used,
+        "swapPercent": round(100.0 * swap_used / swap_total, 1) if swap_total else 0.0,
+    }
+
+
+def gpu_info():
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        name, util, temp, mem_used, mem_total = [p.strip() for p in out.stdout.strip().split(",")]
+        return {
+            "name": name,
+            "percent": float(util),
+            "tempC": float(temp),
+            "vramUsedMiB": float(mem_used),
+            "vramTotalMiB": float(mem_total),
+        }
+    except Exception:
+        return None
+
+
+def busctl_get(object_path, interface, prop):
+    try:
+        out = subprocess.run(
+            ["busctl", "get-property", "org.freedesktop.UDisks2", object_path, interface, prop],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode != 0:
+            return None
+        # Output looks like: `d 303.0` or `q 318` -- value is the last token.
+        return out.stdout.strip().split(None, 1)[1]
+    except Exception:
+        return None
+
+
+def busctl_call(object_path, interface, method, signature="a{sv}", *args):
+    try:
+        subprocess.run(
+            ["busctl", "call", "org.freedesktop.UDisks2", object_path, interface, method, signature, *args],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception:
+        pass
+
+
+def drive_temp_c(device_name):
+    block_path = f"/org/freedesktop/UDisks2/block_devices/{device_name}"
+    drive_path = busctl_get(block_path, "org.freedesktop.UDisks2.Block", "Drive")
+    if not drive_path:
+        return None
+    drive_path = drive_path.strip('"')
+    if drive_path in ("", "/"):
+        return None
+
+    for interface in ("org.freedesktop.UDisks2.Drive.Ata", "org.freedesktop.UDisks2.NVMe.Controller"):
+        busctl_call(drive_path, interface, "SmartUpdate", "a{sv}", "0")
+        raw = busctl_get(drive_path, interface, "SmartTemperature")
+        if raw is None:
+            continue
+        try:
+            kelvin = float(raw)
+        except ValueError:
+            continue
+        if kelvin <= 0:
+            continue
+        return round(kelvin - 273.15, 1)
+    return None
+
+
+def disks_info():
+    try:
+        out = subprocess.run(
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MOUNTPOINT,FSSIZE,FSUSED,MODEL"],
+            capture_output=True, text=True, timeout=3,
+        )
+        data = json.loads(out.stdout)
+    except Exception:
+        return []
+
+    results = []
+    for dev in data.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        name = dev.get("name") or ""
+        if name.startswith("zram") or name.startswith("loop"):
+            continue
+
+        used_bytes = 0
+        fs_bytes = 0
+        stack = list(dev.get("children") or [])
+        while stack:
+            child = stack.pop()
+            if child.get("fssize"):
+                fs_bytes += int(child["fssize"])
+                used_bytes += int(child.get("fsused") or 0)
+            stack.extend(child.get("children") or [])
+
+        results.append({
+            "device": name,
+            "model": (dev.get("model") or "").strip(),
+            "sizeBytes": int(dev.get("size") or 0),
+            "usedBytes": used_bytes,
+            "percent": round(100.0 * used_bytes / fs_bytes, 1) if fs_bytes else None,
+            "tempC": drive_temp_c(name),
+        })
+    return results
+
+
+def main():
+    record = {
+        "updatedAt": time.time(),
+        "cpu": {
+            "percent": cpu_percent(),
+            "tempC": cpu_temp(),
+            "model": cpu_model(),
+        },
+        "mem": mem_info(),
+        "gpu": gpu_info(),
+        "disks": disks_info(),
+    }
+    print(json.dumps(record, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()

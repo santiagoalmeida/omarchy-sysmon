@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "santyalmeida.sysmon",
+  "name": "System Monitor",
+  "version": "1.0.0",
+  "author": "santyalmeida",
+  "description": "Live CPU/GPU/RAM/storage usage and temperature",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "System Monitor",
+    "description": "Live CPU/GPU/RAM/storage usage and temperature",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
