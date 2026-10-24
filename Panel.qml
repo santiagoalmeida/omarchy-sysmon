@@ -111,8 +111,11 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: " " + (root.hasData ? Math.round(root.cpuPercent) + "%" : "…")
-    slotSize: Style.bar.iconSlot * 1.9
+    // Icon and percentage go in separate slots: `text` is fitted into the
+    // bar's icon canvas, so putting the percentage there shrinks it.
+    text: ""
+    labelText: !vertical ? (root.hasData ? Math.round(root.cpuPercent) + "%" : "…") : ""
+    slotSize: Style.bar.iconSlot * (!vertical ? 2 : 1)
     tooltipText: "System Monitor"
     useActiveColor: root.anyHot
     activeColor: root.urgent

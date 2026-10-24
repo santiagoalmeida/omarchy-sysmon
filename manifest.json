@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "santyalmeida.sysmon",
   "name": "System Monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "santyalmeida",
   "description": "Live CPU/GPU/RAM/storage usage and temperature",
   "kinds": [
